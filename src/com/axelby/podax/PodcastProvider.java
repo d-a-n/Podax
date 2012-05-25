@@ -279,9 +279,6 @@ public class PodcastProvider extends ContentProvider {
 			// new at 3: 1 2 3 4 5 do: 3++ 4++ 5++
 			db.execSQL("UPDATE podcasts SET queuePosition = queuePosition + 1 "
 					+ "WHERE queuePosition >= ?", new Object[] { newPosition });
-
-			// download the newly added podcast
-			UpdateService.downloadPodcasts(getContext());
 		} else if (oldPosition != null && newPosition == null) {
 			// remove 3: 1 2 3 4 5 do: 4-- 5--
 			db.execSQL("UPDATE podcasts SET queuePosition = queuePosition - 1 "
@@ -317,8 +314,7 @@ public class PodcastProvider extends ContentProvider {
 		// update specified podcast
 		db.execSQL("UPDATE podcasts SET queuePosition = ? WHERE _id = ?",
 				new Object[] { newPosition, podcastId });
-		getContext().getContentResolver().notifyChange(
-				Uri.withAppendedPath(URI, "queue"), null);
+		getContext().getContentResolver().notifyChange(QUEUE_URI, null);
 	}
 
 	@Override

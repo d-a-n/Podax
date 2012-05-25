@@ -6,6 +6,7 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
+import java.net.MalformedURLException;
 import java.net.URL;
 import java.util.Arrays;
 import java.util.Vector;
@@ -13,136 +14,245 @@ import java.util.Vector;
 import android.app.Notification;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
+import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
+import android.database.ContentObserver;
 import android.database.Cursor;
 import android.media.MediaPlayer;
 import android.net.Uri;
+import android.os.Handler;
+import android.os.IBinder;
 import android.support.v4.app.NotificationCompat;
 import android.util.Log;
 
 import com.axelby.podax.R.drawable;
 import com.axelby.podax.ui.MainActivity;
 
-class PodcastDownloader {
-	private Context _context;
-	private Thread _thread;
-	// how many times we couldn't run the downloader because it was already running
-	private int _interruptCount = 2;
+public class PodcastDownloader extends Service {
+	private DownloadThread _downloadThread;
+	private boolean _started = false;
+	Handler _handler = new Handler();
+	Cursor _queueWatcher;
 
-	PodcastDownloader(Context context) {
-		_context = context;
+	String[] projection = {
+			PodcastProvider.COLUMN_ID,
+			PodcastProvider.COLUMN_TITLE,
+			PodcastProvider.COLUMN_MEDIA_URL,
+			PodcastProvider.COLUMN_FILE_SIZE,
+	};
+
+	@Override
+	public IBinder onBind(Intent arg0) {
+		return null;
 	}
-	
-	public synchronized void download() {
-		// if we've needed to interrupt 4 times, something may be wrong
-		--_interruptCount;
-		if (_thread != null && _interruptCount > 0) {
-			Log.w("Podax", "Downloader is currently running");
-			return;
+
+	@Override
+	public void onCreate() {
+		_downloadThread = new DownloadThread();
+	}
+
+	@Override
+	public int onStartCommand(Intent intent, int flags, int startId) {
+		if (!_started) {
+			_queueWatcher = PodcastDownloader.this.getContentResolver().query(
+					PodcastProvider.QUEUE_URI, projection, null, null,
+					PodcastProvider.COLUMN_QUEUE_POSITION);
+			_queueWatcher.registerContentObserver(new ContentObserver(new Handler()) {
+				@Override
+				public void onChange(boolean selfChange) {
+					Log.d("Podax", "downloader - queue contentobserver noticed a change");
+					super.onChange(selfChange);
+
+					if (_downloadThread == null) {
+						_downloadThread = new DownloadThread();
+						_downloadThread.start();
+					}
+					else
+						_downloadThread.refreshCursor();
+				}
+			});
+			_downloadThread = new DownloadThread();
+			_downloadThread.start();
 		}
-		if (_interruptCount == 0)
-			Log.w("Podax", "Interrupted downloader");
+		_started = true;
 
-		// reset the interrupt counter
-		_interruptCount = 2;
-
-		if (_thread != null && _thread.isAlive())
-			_thread.interrupt();
-		_thread = new Thread(_worker);
-		_thread.start();
+	    return START_STICKY;
 	}
-	
-	public Runnable _worker = new Runnable() {
-		public void run() {
-			if (!Helper.ensureWifi(_context))
+
+	@Override
+	public void onDestroy() {
+		_downloadThread.interrupt();
+	}
+
+	class DownloadThread extends Thread {
+		// the cursor to go through
+		Cursor _queue = null;
+		// if the queue changed, hold the cursor in nextqueue
+		Cursor _nextQueue = null;
+
+		public void refreshCursor() {
+			Log.d("Podax", "downloader - download thread noticed a change");
+			if (!Helper.ensureWifi(PodcastDownloader.this))
 				return;
 
-			verifyDownloadedFiles();
+			// load the next cursor
+			Log.d("Podax", "downloader - download thread loading the queue");
+			if (_nextQueue != null && !_nextQueue.isClosed())
+				_nextQueue.close();
+			_nextQueue = PodcastDownloader.this.getContentResolver().query(
+					PodcastProvider.QUEUE_URI, projection, null, null,
+					PodcastProvider.COLUMN_QUEUE_POSITION);
+		}
 
-			Log.d("Podax", "starting podcast downloader on thread " + Thread.currentThread().getId());
-			Cursor cursor = null;
+		@Override
+		public void run() {
+			Thread.currentThread().setName("PodcastDownloader_Download");
 			try {
-				String[] projection = {
-						PodcastProvider.COLUMN_ID,
-						PodcastProvider.COLUMN_TITLE,
-						PodcastProvider.COLUMN_MEDIA_URL,
-						PodcastProvider.COLUMN_FILE_SIZE,
-				};
-				cursor = _context.getContentResolver().query(PodcastProvider.QUEUE_URI, projection, null, null, null);
-				while (cursor.moveToNext()) {
-					PodcastCursor podcast = new PodcastCursor(_context, cursor);
-					if (podcast.isDownloaded())
-						continue;
+				if (!Helper.ensureWifi(PodcastDownloader.this))
+					return;
 
-					File mediaFile = new File(podcast.getFilename());
-	
-					try {
-						if (PodcastDownloader.this._thread != Thread.currentThread())
-							return;
+				verifyDownloadedFiles();
 
-						Log.d("Podax", "Downloading " + podcast.getTitle());
-						updateDownloadNotification(podcast, 0);
-	
-						URL u = new URL(podcast.getMediaUrl());
-						HttpURLConnection c = (HttpURLConnection)u.openConnection();
-						if (mediaFile.exists() && mediaFile.length() > 0)
-							c.setRequestProperty("Range", "bytes=" + mediaFile.length() + "-");
-	
-						// only valid response codes are 200 and 206
-						if (c.getResponseCode() != 200 && c.getResponseCode() != 206)
-							continue;
-
-						// response code 206 means partial content and range header worked
-						boolean append = false;
-						if (c.getResponseCode() == 206) {
-							// make sure there's more data to download
-							if (c.getContentLength() <= 0) {
-								podcast.setFileSize(mediaFile.length());
-								continue;
-							}
-							append = true;
-						} else {
-							podcast.setFileSize(c.getContentLength());
-						}
-	
-						if (!downloadFile(c, mediaFile, append))
-							continue;
-
-						if (mediaFile.length() == c.getContentLength()) {
-							MediaPlayer mp = new MediaPlayer();
-							mp.setDataSource(podcast.getFilename());
-							mp.prepare();
-							podcast.setDuration(mp.getDuration());
-							mp.release();
-						}
-	
-						Log.d("Podax", "Done downloading " + podcast.getTitle());
-					} catch (Exception e) {
-						Log.e("Podax", "Exception while downloading " + podcast.getTitle(), e);
-						removeDownloadNotification();
-						break;
-					}
+				if (_queue == null) {
+					_queue = PodcastDownloader.this.getContentResolver().query(
+							PodcastProvider.QUEUE_URI, projection, null, null,
+							PodcastProvider.COLUMN_QUEUE_POSITION);
 				}
+				downloadPodcastsInQueue();
+
+				// if there's another queue cursor waiting, go through it
+				while (_nextQueue != null) {
+					Log.d("Podax", "downloader - download thread noticed the queue changed");
+					_queue.close();
+					_queue = _nextQueue;
+					_nextQueue = null;
+					downloadPodcastsInQueue();
+				}
+
+				Log.d("Podax", "downloader - download thread finished downloading podcasts");
 			} finally {
-				if (cursor != null)
-					cursor.close();
+				if (_queue != null && !_queue.isClosed())
+					_queue.close();
+				_queue = null;
+				if (_nextQueue != null && !_nextQueue.isClosed())
+					_nextQueue.close();
+				_nextQueue = null;
+
 				removeDownloadNotification();
-				_thread = null;
+
+				_downloadThread = null;
 			}
 		}
 
-		private boolean downloadFile(HttpURLConnection conn, File file, boolean append) {
+		private void downloadPodcastsInQueue() {
+			_queue.moveToFirst();
+			while (_queue.moveToNext()) {
+				PodcastCursor podcast = new PodcastCursor(PodcastDownloader.this, _queue);
+
+				if (podcast.isDownloaded())
+					continue;
+
+				try {
+					if (hasQueueChanged())
+						return;
+
+					File mediaFile = new File(podcast.getFilename());
+					Log.d("Podax", "Downloading " + podcast.getTitle());
+					updateDownloadNotification(podcast.getTitle(), 0);
+
+					HttpURLConnection c = createConnection(podcast, mediaFile);
+
+					if (hasQueueChanged())
+						return;
+
+					// only valid response codes are 200 and 206
+					if (c.getResponseCode() != 200 && c.getResponseCode() != 206)
+						continue;
+
+					if (hasQueueChanged())
+						return;
+
+					// response code 206 means partial content and range header worked
+					if (c.getResponseCode() == 206) {
+						// make sure there's more data to download
+						if (c.getContentLength() <= 0) {
+							podcast.setFileSize(mediaFile.length());
+							continue;
+						}
+					} else {
+						// if we did a range, the server doesn't support it
+						if (mediaFile.exists())
+							mediaFile.delete();
+						podcast.setFileSize(c.getContentLength());
+					}
+
+					if (hasQueueChanged())
+						break;
+
+					if (!downloadFile(podcast.getId(), c, mediaFile)) {
+						Log.d("Podax", "downloader - did not finish downloading file");
+						continue;
+					}
+					Log.d("Podax", "downloader - finished downloading the file");
+
+					if (mediaFile.length() == c.getContentLength()) {
+						MediaPlayer mp = new MediaPlayer();
+						mp.setDataSource(podcast.getFilename());
+						mp.prepare();
+						podcast.setDuration(mp.getDuration());
+						mp.release();
+					}
+
+					Log.d("Podax", "Done downloading " + podcast.getTitle());
+				} catch (Exception e) {
+					Log.e("Podax", "Exception while downloading " + podcast.getTitle(), e);
+					removeDownloadNotification();
+					break;
+				}
+			}
+		}
+
+		private boolean hasQueueChanged() {
+			return _nextQueue != null;
+		}
+
+		private boolean shouldStopDownloading(long podcastId) {
+			return _nextQueue != null && !isPodcastInQueue(_nextQueue, podcastId);
+		}
+
+
+		private boolean isPodcastInQueue(Cursor queue, long podcastId) {
+			queue.moveToFirst();
+			while (queue.moveToNext())
+				if (queue.getLong(0) == podcastId)
+					return true;
+				else
+					Log.d("Podax", String.valueOf(podcastId) + " != " + queue.getLong(0));
+			Log.d("Podax", "podcast not in queue");
+			return false;
+		}
+
+		private HttpURLConnection createConnection(
+				PodcastCursor podcast, File mediaFile)
+				throws MalformedURLException, IOException {
+			URL u = new URL(podcast.getMediaUrl());
+			HttpURLConnection c = (HttpURLConnection)u.openConnection();
+			if (mediaFile.exists() && mediaFile.length() > 0)
+				c.setRequestProperty("Range", "bytes=" + mediaFile.length() + "-");
+			return c;
+		}
+
+		private boolean downloadFile(long podcastId, HttpURLConnection conn, File file) {
 			FileOutputStream outstream = null;
 			InputStream instream = null;
 			try {
-				outstream = new FileOutputStream(file, append);
+				outstream = new FileOutputStream(file, true);
 				instream = conn.getInputStream();
 				int read;
 				byte[] b = new byte[1024*64];
-				while (!Thread.currentThread().isInterrupted() &&
-						Thread.currentThread() == PodcastDownloader.this._thread &&
-						(read = instream.read(b, 0, b.length)) != -1)
+				while (!shouldStopDownloading(podcastId)
+						&& (read = instream.read(b, 0, b.length)) != -1)
 					outstream.write(b, 0, read);
 			} catch (Exception e) {
 				return false;
@@ -152,7 +262,7 @@ class PodcastDownloader {
 			}
 			return file.length() == conn.getContentLength();
 		}
-	};
+	}
 
 	private void verifyDownloadedFiles() {
 		Vector<String> validMediaFilenames = new Vector<String>();
@@ -161,9 +271,9 @@ class PodcastDownloader {
 				PodcastProvider.COLUMN_MEDIA_URL,
 		};
 		Uri queueUri = Uri.withAppendedPath(PodcastProvider.URI, "queue");
-		Cursor c = _context.getContentResolver().query(queueUri, projection, null, null, null);
+		Cursor c = getContentResolver().query(queueUri, projection, null, null, null);
 		while (c.moveToNext())
-			validMediaFilenames.add(new PodcastCursor(_context, c).getFilename());
+			validMediaFilenames.add(new PodcastCursor(this, c).getFilename());
 		c.close();
 
 		File dir = new File(PodcastCursor.getStoragePath());
@@ -189,28 +299,28 @@ class PodcastDownloader {
 		}
 	}
 
-	void updateDownloadNotification(PodcastCursor podcast, long downloaded) {
-		Intent notificationIntent = MainActivity.getSubscriptionIntent(_context);
-		PendingIntent contentIntent = PendingIntent.getActivity(_context, 0, notificationIntent, 0);
+	void updateDownloadNotification(String title, long downloaded) {
+		Intent notificationIntent = MainActivity.getSubscriptionIntent(this);
+		PendingIntent contentIntent = PendingIntent.getActivity(this, 0, notificationIntent, 0);
 
-		Notification notification = new NotificationCompat.Builder(_context)
+		Notification notification = new NotificationCompat.Builder(this)
 				.setSmallIcon(drawable.icon)
-				.setTicker("Downloading podcast: " + podcast.getTitle())
+				.setTicker("Downloading podcast: " + title)
 				.setWhen(System.currentTimeMillis())
 				.setContentTitle("Downloading Podcast")
-				.setContentText(podcast.getTitle())
+				.setContentText(title)
 				.setContentIntent(contentIntent)
 				.setOngoing(true)
 				.getNotification();
 		
-		NotificationManager notificationManager = (NotificationManager) _context
-				.getSystemService(Context.NOTIFICATION_SERVICE);
+		NotificationManager notificationManager = (NotificationManager) 
+				getSystemService(Context.NOTIFICATION_SERVICE);
 		notificationManager.notify(Constants.PODCAST_DOWNLOAD_ONGOING, notification);
 	}
 
 	void removeDownloadNotification() {
 		String ns = Context.NOTIFICATION_SERVICE;
-		NotificationManager notificationManager = (NotificationManager) _context.getSystemService(ns);
+		NotificationManager notificationManager = (NotificationManager) getSystemService(ns);
 		notificationManager.cancel(Constants.PODCAST_DOWNLOAD_ONGOING);
 	}
 }

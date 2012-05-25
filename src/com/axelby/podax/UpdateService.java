@@ -32,16 +32,8 @@ public class UpdateService extends Service {
 		context.startService(intent);
 	}
 
-	public static void downloadPodcasts(Context context) {
-		Intent intent = new Intent(context, UpdateService.class);
-		intent.setAction(Constants.ACTION_DOWNLOAD_PODCASTS);
-		intent.putExtra(Constants.EXTRA_MANUAL_REFRESH, true);
-		context.startService(intent);
-	}
-
 	private SubscriptionUpdateBinder _binder = new SubscriptionUpdateBinder();
 	private SubscriptionUpdater _subscriptionUpdater;
-	private PodcastDownloader _podcastDownloader;
 
 	public class SubscriptionUpdateBinder extends Binder {
 		UpdateService getService() {
@@ -56,7 +48,6 @@ public class UpdateService extends Service {
 	@Override
 	public void onCreate() {
 		_subscriptionUpdater = new SubscriptionUpdater(this);
-		_podcastDownloader = new PodcastDownloader(this);
 	}
 
 	@Override
@@ -83,19 +74,16 @@ public class UpdateService extends Service {
 			Toast.makeText(this, R.string.update_request_no_wifi, Toast.LENGTH_SHORT).show();
 			return;
 		}
+
 		if (action.equals(Constants.ACTION_REFRESH_ALL_SUBSCRIPTIONS)) {
 			_subscriptionUpdater.addAllSubscriptions();
 			_subscriptionUpdater.run();
-		}
-		else if (action.equals(Constants.ACTION_REFRESH_SUBSCRIPTION)) {
+		} else if (action.equals(Constants.ACTION_REFRESH_SUBSCRIPTION)) {
 			int subscriptionId = intent.getIntExtra(Constants.EXTRA_SUBSCRIPTION_ID, -1);
 			if (subscriptionId != -1) {
 				_subscriptionUpdater.addSubscriptionId(subscriptionId);
 				_subscriptionUpdater.run();
 			}
-		}
-		else if (action.equals(Constants.ACTION_DOWNLOAD_PODCASTS)) {
-			_podcastDownloader.download();
 		}
 	}
 }

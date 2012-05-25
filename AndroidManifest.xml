@@ -112,6 +112,7 @@
             android:theme="@android:style/Theme.Black.NoTitleBar" />
 
         <service android:name=".UpdateService" />
+        <service android:name=".PodcastDownloader" />
         <service android:name=".PlayerService" />
 
         <receiver

@@ -11,12 +11,14 @@ public class BootReceiver extends BroadcastReceiver {
 
 	@Override
 	public void onReceive(Context context, Intent intent) {
+		// intent will always be BOOT_COMPLETED
 		setupAlarms(context);
 	}
 
 	public static void setupAlarms(Context context) {
-		// intent will always be BOOT_COMPLETED
 		AlarmManager alarmManager = (AlarmManager)context.getSystemService(Context.ALARM_SERVICE);
+
+		context.startService(new Intent(context, PodcastDownloader.class));
 
 		// refresh the feeds
 		Intent refreshIntent = new Intent(context, UpdateService.class);

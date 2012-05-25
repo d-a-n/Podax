@@ -182,7 +182,6 @@ public class SubscriptionUpdater {
 			} finally {
 				removeUpdateNotification();
 				_runningThread = null;
-				UpdateService.downloadPodcasts(_context);
 			}
 		}
 

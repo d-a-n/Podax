@@ -17,6 +17,7 @@ import com.actionbarsherlock.app.SherlockFragmentActivity;
 import com.actionbarsherlock.view.Menu;
 import com.actionbarsherlock.view.MenuInflater;
 import com.actionbarsherlock.view.MenuItem;
+import com.axelby.podax.BootReceiver;
 import com.axelby.podax.Constants;
 import com.axelby.podax.R;
 import com.axelby.podax.SubscriptionProvider;
@@ -83,6 +84,8 @@ public class MainActivity extends SherlockFragmentActivity {
 			}
 			c.close();
 		}
+
+		BootReceiver.setupAlarms(getApplicationContext());
 	}
 
 	@Override
@@ -110,9 +113,6 @@ public class MainActivity extends SherlockFragmentActivity {
 		switch (item.getItemId()) {
 		case R.id.add_subscription:
 			startActivity(new Intent(this, AddSubscriptionActivity.class));
-			return true;
-		case R.id.restart:
-			UpdateService.downloadPodcasts(this);
 			return true;
 		case R.id.preferences:
 			startActivity(new Intent(this, Preferences.class));
